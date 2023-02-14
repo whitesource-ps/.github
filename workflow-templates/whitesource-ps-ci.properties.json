@@ -1,0 +1,12 @@
+{
+    "name": "Mend PS Workflow",
+    "description": "Mend PS CI starter workflow.",
+    "iconName": "mend-logo",
+    "categories": [
+        "Python"
+    ],
+    "filePatterns": [
+        "^setup.py$",
+        "requirements.txt$"
+    ]
+}

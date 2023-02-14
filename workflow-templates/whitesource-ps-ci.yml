@@ -1,0 +1,112 @@
+name: Mend PS CI
+
+on:
+  push:
+    branches:
+      - $default-branch
+      - '!ws-iac-scan-results/**'
+      - '!whitesource-remediate/master-all**'
+      - '!whitesource/migrate-configuration**'
+    tags:
+      - '*'
+  # pull_request:
+  #   branches:
+  #     - $default-branch
+  #     - '!ws-iac-scan-results/**'
+  #     - '!whitesource-remediate/master-all**'
+  #     - '!whitesource/migrate-configuration**'
+  # schedule:
+  #   - cron: '0 4 * * *'
+
+# env:
+#   GH_USER: ${{ github.actor }}
+#   COMMIT_ID: ${{ github.sha }}
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    outputs:
+      python_version: ${{ steps.set_env_vars.outputs.PYTHON_VERSION }}
+      min_py_ver: ${{ steps.set_env_vars.outputs.MIN_PY_VER }}
+      version: ${{ steps.set_env_vars.outputs.VERSION }}
+      release: ${{ steps.set_env_vars.outputs.RELEASE }}
+      tool_dir: ${{ steps.set_env_vars.outputs.TOOL_DIR }}
+      source_branch: ${{ steps.get_source_branch.outputs.SOURCE_BRANCH }}
+
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10' , '3.11']
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set Environment Variables
+        id: set_env_vars
+        run: |
+          echo "PYTHON_VERSION=${{ matrix.python-version }}" >> $GITHUB_OUTPUT
+          if [[ ${{ strategy.job-index }} == 0 ]]; then
+            echo "MIN_PY_VER=${{ matrix.python-version }}" >> $GITHUB_OUTPUT
+          fi
+          echo "VERSION=0.0.0.ci0" >> $GITHUB_OUTPUT
+          echo "RELEASE=false" >> $GITHUB_OUTPUT
+          echo "TOOL_DIR=${{env.TOOL_NAME}}" >> $GITHUB_OUTPUT
+          if [[ "$GITHUB_REF" == *"refs/tags/v"* || "$GITHUB_REF" == *"refs/tags/test-v"* ]]; then
+            echo "VERSION=$(echo ${{github.ref}} | sed -r 's/^[\/a-zA-z-]+//')" >> $GITHUB_OUTPUT
+            if [[ $VERSION != *@(a|b)* ]]; then
+              echo "RELEASE=true" >> $GITHUB_OUTPUT
+            fi
+          fi
+      
+      - name: Get Source Branch
+        id: get_source_branch
+        run: |
+          echo "SOURCE_BRANCH=$(git branch --contains ${{env.COMMIT_ID}} | grep -E 'feature|staging' | sed 's/[ *]//g')" >> $GITHUB_OUTPUT
+      
+      - name: Set Package Version
+        run: |
+          sed -E -i  "s/^__version__ = \"[a-z0-9\.]+\"/__version__ = \"${{steps.set_env_vars.outputs.VERSION}}\"/g"  ${{ steps.set_env_vars.outputs.TOOL_DIR }}/_version.py
+      
+      - name: Check Unit Test Files
+        id: check_test_files
+        uses: andstor/file-existence-action@v2
+        with:
+          files: "*/tests/test_*.py"
+          
+      - name: Run Tests with pytest
+        if: steps.check_test_files.outputs.files_exists == 'true'
+        # run: pytest
+        run: |
+          echo "Test files were found"
+
+      - name: No Tests
+        if: steps.check_test_files.outputs.files_exists == 'false'
+        run: |
+          echo "No test files found"
+      
+  publish:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/staging'}}
+    needs: [build-and-test]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Restore whl
+        uses: actions/cache@v3
+        with:
+          path: dist/${{needs.build-and-test.outputs.min_py_ver}}/${{needs.build-and-test.outputs.tool_dir}}-${{needs.build-and-test.outputs.version}}-py3-none-any.whl
+          key: ${{needs.build-and-test.outputs.min_py_ver}}_${{needs.build-and-test.outputs.tool_dir}}_${{ github.run_id }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+
+      - name: Upload to S3 Bucket
+        env:
+          AWS_BUCKET: mend-ps-staging
+        run: |
+          TIMESTAMP=$(date +"%Y-%m-%d_%H-%M")
+          echo aws s3 cp dist/${{needs.build-and-test.outputs.min_py_ver}}/${{needs.build-and-test.outputs.tool_dir}}-${{needs.build-and-test.outputs.version}}-py3-none-any.whl s3://${AWS_BUCKET}/${{needs.build-and-test.outputs.tool_dir}}/"$TIMESTAMP"_${{ env.TOOL_NAME }}.whl
+          echo aws s3api put-object-tagging --bucket "$AWS_BUCKET" --key ${{needs.build-and-test.outputs.tool_dir}}/"$TIMESTAMP"_${{ env.TOOL_NAME }}.whl --tagging "{\"TagSet\": [{\"Key\": \"User\", \"Value\": \"${{ env.GH_USER}}\"},{\"Key\": \"Branch\", \"Value\": \"${{needs.build-and-test.outputs.source_branch}}\"},{\"Key\": \"CommitId\", \"Value\": \"${{env.COMMIT_ID}}\"}]}"
