@@ -5,6 +5,7 @@
     "categories": [
         "Python"
     ],
+    "labels": ["preview"],
     "filePatterns": [
         "^setup.py$",
         "requirements.txt$"
